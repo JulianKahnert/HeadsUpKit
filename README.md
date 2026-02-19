@@ -40,4 +40,4 @@ All contributions are welcome!
 Feel free to submit pull requests or open issues.
 
 ## :book: License
-MIT
+[Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)](LICENSE)
