@@ -1,0 +1,98 @@
+name: GitHub Release
+
+on:
+  push:
+    tags:
+      - "*.*.*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Generate release notes
+        id: notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          PREV_TAG=$(git tag --sort=-v:refname | grep -A1 "^$TAG$" | tail -1)
+
+          if [ -n "$PREV_TAG" ] && [ "$PREV_TAG" != "$TAG" ]; then
+            NOTES=$(gh api repos/${{ github.repository }}/releases/generate-notes \
+              -f tag_name="$TAG" \
+              -f previous_tag_name="$PREV_TAG" \
+              --jq '.body')
+          else
+            NOTES=$(gh api repos/${{ github.repository }}/releases/generate-notes \
+              -f tag_name="$TAG" \
+              --jq '.body')
+          fi
+
+          {
+            echo 'body<<EOF'
+            echo "$NOTES"
+            echo 'EOF'
+          } >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body: ${{ steps.notes.outputs.body }}
+
+  bump-version:
+    needs: release
+    runs-on: macos-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Calculate next version
+        id: version
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          IFS='.' read -ra VERSION_PARTS <<< "$TAG"
+          MAJOR=${VERSION_PARTS[0]}
+          MINOR=${VERSION_PARTS[1]}
+          NEXT_MINOR=$((MINOR + 1))
+          NEXT_VERSION="${MAJOR}.${NEXT_MINOR}.0"
+          echo "current_version=$TAG" >> $GITHUB_OUTPUT
+          echo "next_version=$NEXT_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Create version bump PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NEXT_VERSION="${{ steps.version.outputs.next_version }}"
+          BRANCH="feature/bump-version-$NEXT_VERSION"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+
+          sed -i '' "s/MARKETING_VERSION = [^;]*;/MARKETING_VERSION = $NEXT_VERSION;/g" HeadsUpKit.xcodeproj/project.pbxproj
+          git add HeadsUpKit.xcodeproj/project.pbxproj
+          git commit -m "chore: bump version to $NEXT_VERSION"
+          git push origin "$BRANCH"
+
+          gh pr create \
+            --title "chore: bump version to $NEXT_VERSION" \
+            --body "Automated version bump after release ${{ steps.version.outputs.current_version }}
+
+          ## Changes
+          - Update MARKETING_VERSION to $NEXT_VERSION
+
+          Automated PR created by GitHub Actions" \
+            --base main \
+            --head "$BRANCH"
