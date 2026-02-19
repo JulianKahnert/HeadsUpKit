@@ -27,4 +27,16 @@ This is a macOS menu bar app (minimum deployment target: macOS 26.2) using Swift
 3. A 20s timer checks if the next event is within the user-configured lead time (default 60s)
 4. When triggered, `showOverlay()` creates a borderless `NSWindow` at `.screenSaver` level with `NSVisualEffectView` blur
 5. `OverlayView` shows event title, description, countdown timer, and optional map with location
-6. Menu bar provides: test overlay, lead time slider, calendar selection submenu, quit
+6. Menu bar provides: test overlay (debug only), lead time slider, calendar selection submenu, quit
+
+## CI/CD
+
+- **PR checks** (`.github/workflows/pr.yml`): Builds on every PR with `xcodebuild` on `macos-26`
+- **Release** (`.github/workflows/release.yml`): Triggered by tags (`*.*.*`), creates GitHub Release with auto-generated notes, signs and notarizes the app with Developer ID, uploads ZIP to release, and opens a version bump PR
+- Team ID: `87KNVHZ8C7`
+
+## Distribution
+
+- **Homebrew**: `brew tap juliankahnert/tap && brew install --cask headsupkit`
+  - Cask definition lives in [JulianKahnert/homebrew-tap](https://github.com/JulianKahnert/homebrew-tap)
+- **License**: CC BY-NC-SA 4.0

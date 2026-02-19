@@ -30,7 +30,15 @@ Never miss a meeting again. HeadsUpKit lives in your menu bar and displays a ful
 
 ## :floppy_disk: Installation
 
-Clone the repository and build it:
+### Homebrew
+
+```bash
+brew tap juliankahnert/tap
+brew install --cask headsupkit
+```
+
+### From source
+
 * Download and install [Xcode.app](https://apps.apple.com/app/xcode/id497799835)
 * Get the project: `git clone https://github.com/JulianKahnert/HeadsUpKit.git`
 * Build and run `HeadsUpKit`
