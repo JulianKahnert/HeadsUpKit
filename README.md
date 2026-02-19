@@ -1,14 +1,6 @@
-<p align="center">
-  <img src="HeadsUpKit/Assets.xcassets/AppIcon.appiconset/Contents.json" width="0" height="0">
-  <strong style="font-size: 48px;">HeadsUpKit</strong>
-  <br>
-  <br>
-  A macOS menu bar app that shows a fullscreen overlay when your next calendar event is about to start.
-</p>
+# HeadsUpKit :calendar:
 
-# HeadsUpKit
-
-Never miss a meeting again. HeadsUpKit lives in your menu bar and displays a fullscreen heads-up overlay with event details and a countdown timer right before your next calendar event starts.
+> Never miss a meeting again. HeadsUpKit lives in your menu bar and displays a fullscreen heads-up overlay with event details and a countdown timer right before your next calendar event starts.
 
 ## :rocket: Usage
 1. Launch the app — it appears as a calendar icon in the menu bar
