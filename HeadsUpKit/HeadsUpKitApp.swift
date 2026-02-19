@@ -42,7 +42,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.image = NSImage(
-            systemSymbolName: "calendar.badge.clock",
+            systemSymbolName: "calendar.badge",
             accessibilityDescription: "Upcoming Event"
         )
 
