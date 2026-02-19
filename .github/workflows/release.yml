@@ -151,7 +151,7 @@ jobs:
           TAG="${{ steps.package.outputs.tag }}"
           SHA="${{ steps.package.outputs.sha256 }}"
 
-          gh repo clone JulianKahnert/homebrew-tap "$RUNNER_TEMP/homebrew-tap"
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/JulianKahnert/homebrew-tap.git" "$RUNNER_TEMP/homebrew-tap"
           cd "$RUNNER_TEMP/homebrew-tap"
 
           git config user.name "github-actions[bot]"
@@ -162,4 +162,4 @@ jobs:
 
           git add Casks/headsupkit.rb
           git commit -m "Update HeadsUpKit to $TAG"
-          git push origin main
+          git push
