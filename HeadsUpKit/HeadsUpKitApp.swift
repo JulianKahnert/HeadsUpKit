@@ -48,8 +48,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let menu = NSMenu()
         menu.delegate = self
+        #if DEBUG
         menu.addItem(NSMenuItem(title: "Test Overlay", action: #selector(triggerTestOverlay), keyEquivalent: "t"))
         menu.addItem(.separator())
+        #endif
 
         let sliderItem = NSMenuItem()
         let sliderHosting = NSHostingView(rootView: LeadTimeSlider())
