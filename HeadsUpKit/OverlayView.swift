@@ -118,7 +118,7 @@ struct OverlayView: View {
                 .padding(.vertical, 8)
         }
         .keyboardShortcut(.escape, modifiers: [])
-        .buttonStyle(.glassProminent)
+        .buttonStyle(.bordered)
         .controlSize(.large)
         .padding(.top, 4)
     }
@@ -134,7 +134,7 @@ struct OverlayView: View {
             logger.warning("Geocoding failed for: \(address, privacy: .public)")
             return
         }
-        let coordinate = item.location.coordinate
+        let coordinate = item.placemark.coordinate
         logger.debug("Geocoded '\(address, privacy: .public)' → \(coordinate.latitude), \(coordinate.longitude)")
         mapPosition = .region(MKCoordinateRegion(
             center: coordinate,

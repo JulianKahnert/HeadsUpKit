@@ -18,7 +18,7 @@ struct HeadsUpKitApp: App {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
-    private var overlayWindow: NSWindow?
+    private var overlayWindows: [NSWindow] = []
     private var calendarService = CalendarService()
     private var checkTimer: Timer?
     private var shownEventIDs: Set<String> = []
@@ -108,42 +108,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Overlay
 
-    private func showOverlay(title: String, description: String?, location: String? = nil, eventDate: Date? = nil) {
-        guard let screen = NSScreen.main else { return }
+    private func dismissOverlay() {
+        for window in overlayWindows {
+            window.orderOut(nil)
+        }
+        overlayWindows.removeAll()
+    }
 
+    private func showOverlay(title: String, description: String?, location: String? = nil, eventDate: Date? = nil) {
+        let screens = NSScreen.screens
+        guard let mainScreen = screens.first else { return }
+
+        // Main screen: blur + overlay content
+        let mainWindow = makeBlurWindow(for: mainScreen)
+        let contentView = OverlayView(title: title, description: description, location: location, eventDate: eventDate) { [weak self] in
+            self?.dismissOverlay()
+        }
+        let hostingView = NSHostingView(rootView: contentView
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        )
+        hostingView.frame = mainWindow.contentView?.bounds ?? .zero
+        hostingView.autoresizingMask = [.width, .height]
+        (mainWindow.contentView as? NSVisualEffectView)?.addSubview(hostingView)
+        mainWindow.makeKeyAndOrderFront(nil)
+        overlayWindows.append(mainWindow)
+
+        // Secondary screens: blur only
+        for screen in screens.dropFirst() {
+            let window = makeBlurWindow(for: screen)
+            window.orderFront(nil)
+            overlayWindows.append(window)
+        }
+
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func makeBlurWindow(for screen: NSScreen) -> NSWindow {
         let window = NSWindow(
-            contentRect: screen.frame,
+            contentRect: .zero,
             styleMask: .borderless,
             backing: .buffered,
             defer: false
         )
-
         window.level = .screenSaver
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = false
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        window.ignoresMouseEvents = false
 
-        // Native macOS blur background
-        let visualEffect = NSVisualEffectView(frame: screen.frame)
+        let visualEffect = NSVisualEffectView()
         visualEffect.blendingMode = .behindWindow
         visualEffect.state = .active
         visualEffect.material = .hudWindow
+        visualEffect.autoresizingMask = [.width, .height]
 
-        let contentView = OverlayView(title: title, description: description, location: location, eventDate: eventDate) { [weak self] in
-            self?.overlayWindow?.orderOut(nil)
-            self?.overlayWindow = nil
-        }
-
-        let hostingView = NSHostingView(rootView: contentView)
-        hostingView.frame = screen.frame
-        visualEffect.addSubview(hostingView)
         window.contentView = visualEffect
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-
-        overlayWindow = window
+        window.setFrame(screen.frame, display: true)
+        return window
     }
 }
 
