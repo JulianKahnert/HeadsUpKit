@@ -24,10 +24,10 @@ This is a macOS menu bar app (minimum deployment target: macOS 15) using SwiftUI
 **Flow:**
 1. `HeadsUpKitApp` (entry point) uses `@NSApplicationDelegateAdaptor` for an `AppDelegate` that manages the menu bar and overlay
 2. `CalendarService` polls EventKit for the next upcoming event from selected calendars
-3. A 20s timer checks if the next event is within the user-configured lead time (default 60s)
+3. A 30s timer checks if the next event is within the user-configured lead time (default 60s)
 4. When triggered, `showOverlay()` creates a borderless `NSWindow` at `.screenSaver` level with `NSVisualEffectView` blur
 5. `OverlayView` shows event title, description, countdown timer, and optional map with location
-6. Menu bar provides: test overlay (debug only), lead time slider, calendar selection submenu, quit
+6. Menu bar shows today's upcoming events (clickable → opens Calendar.app), lead time slider, calendar selection submenu, test overlay (debug only), and quit
 
 ## CI/CD
 
