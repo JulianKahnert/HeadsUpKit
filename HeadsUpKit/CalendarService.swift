@@ -22,6 +22,16 @@ final class CalendarService {
         }
     }
 
+    var upcomingEvents: [EKEvent] {
+        let now = Date.now
+        let end = Calendar.current.startOfDay(for: now).addingTimeInterval(24 * 60 * 60)
+        let ids = selectedCalendarIDs
+        let filtered = ids.isEmpty ? [] : allCalendars.filter { ids.contains($0.calendarIdentifier) }
+        let calendars: [EKCalendar]? = filtered.isEmpty ? nil : filtered
+        let predicate = store.predicateForEvents(withStart: now, end: end, calendars: calendars)
+        return store.events(matching: predicate).filter { $0.startDate > now }
+    }
+
     var nextEvent: EKEvent? {
         let now = Date.now
         let end = now.addingTimeInterval(24 * 60 * 60)

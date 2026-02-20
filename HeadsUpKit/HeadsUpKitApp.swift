@@ -20,21 +20,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var overlayWindows: [NSWindow] = []
     private var calendarService = CalendarService()
-    private var checkTimer: Timer?
+    private var pollTask: Task<Void, Never>?
+    private var pendingOverlayTask: Task<Void, Never>?
+    private var pendingEventID: String?
     private var shownEventIDs: Set<String> = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         UserDefaults.standard.register(defaults: ["leadTimeSeconds": 60.0])
         setupStatusItem()
 
-        Task {
+        pollTask = Task {
             await calendarService.requestAccess()
-            checkUpcomingEvent()
+            while !Task.isCancelled {
+                await checkUpcomingEvent()
+                try? await Task.sleep(for: .seconds(30))
+            }
         }
+    }
 
-        checkTimer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
-            self?.checkUpcomingEvent()
-        }
+    func applicationWillTerminate(_ notification: Notification) {
+        pollTask?.cancel()
+        pendingOverlayTask?.cancel()
     }
 
     // MARK: - Status Item
@@ -42,7 +48,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.image = NSImage(
-            systemSymbolName: "calendar.badge",
+            systemSymbolName: "calendar",
             accessibilityDescription: "Upcoming Event"
         )
 
@@ -75,6 +81,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         showOverlay(title: "Team Standup", description: "1. Sprint progress & blockers\n2. Code review assignments\n3. Release timeline update", location: "Apple Park, Cupertino", eventDate: Date.now.addingTimeInterval(45))
     }
 
+    @objc private func openEventInCalendar(_ sender: NSMenuItem) {
+        guard let url = URL(string: "ical://") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
     @objc private func toggleCalendar(_ sender: NSMenuItem) {
         guard let calendarID = sender.representedObject as? String,
               let calendar = calendarService.allCalendars.first(where: { $0.calendarIdentifier == calendarID }) else { return }
@@ -83,27 +94,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Event Check
 
-    private func checkUpcomingEvent() {
+    private func checkUpcomingEvent() async {
         guard let event = calendarService.nextEvent else {
             logger.debug("No upcoming event found")
+            pendingOverlayTask?.cancel()
+            pendingOverlayTask = nil
+            pendingEventID = nil
             return
         }
 
+        let eventID = event.eventIdentifier ?? UUID().uuidString
         let threshold = UserDefaults.standard.double(forKey: "leadTimeSeconds")
         let timeUntilEvent = event.startDate.timeIntervalSinceNow
         logger.debug("Next event: \(event.title ?? "nil", privacy: .public) in \(Int(timeUntilEvent))s (threshold: \(Int(threshold))s)")
 
-        guard timeUntilEvent <= threshold, timeUntilEvent > 0 else { return }
-
-        let eventID = event.eventIdentifier ?? UUID().uuidString
         guard !shownEventIDs.contains(eventID) else {
             logger.debug("Event already shown: \(event.title ?? "nil", privacy: .public)")
             return
         }
 
-        shownEventIDs.insert(eventID)
-        logger.info("Showing overlay for: \(event.title ?? "nil", privacy: .public)")
-        showOverlay(title: event.title ?? "Upcoming Event", description: event.notes, location: event.location, eventDate: event.startDate)
+        // Already scheduled for this event
+        guard pendingEventID != eventID else { return }
+
+        // Cancel previous pending task if event changed
+        pendingOverlayTask?.cancel()
+        pendingOverlayTask = nil
+        pendingEventID = nil
+
+        let sleepDuration = timeUntilEvent - threshold
+        let title = event.title ?? "Upcoming Event"
+        let notes = event.notes
+        let location = event.location
+        let startDate = event.startDate
+
+        if sleepDuration <= 0, timeUntilEvent > 0 {
+            // Already within threshold window — show immediately
+            shownEventIDs.insert(eventID)
+            logger.info("Showing overlay for: \(title, privacy: .public)")
+            showOverlay(title: title, description: notes, location: location, eventDate: startDate)
+        } else if sleepDuration > 0 {
+            // Schedule precise wake-up
+            pendingEventID = eventID
+            logger.info("Scheduling overlay for: \(title, privacy: .public) in \(Int(sleepDuration))s")
+            pendingOverlayTask = Task {
+                do {
+                    try await Task.sleep(for: .seconds(sleepDuration))
+                    shownEventIDs.insert(eventID)
+                    logger.info("Showing overlay for: \(title, privacy: .public)")
+                    showOverlay(title: title, description: notes, location: location, eventDate: startDate)
+                } catch {
+                    logger.debug("Pending overlay cancelled for: \(title, privacy: .public)")
+                }
+                pendingEventID = nil
+                pendingOverlayTask = nil
+            }
+        }
     }
 
     // MARK: - Overlay
@@ -189,7 +234,60 @@ struct LeadTimeSlider: View {
 // MARK: - NSMenuDelegate
 
 extension AppDelegate: NSMenuDelegate {
+    private static let eventItemTag = 999
+
     func menuNeedsUpdate(_ menu: NSMenu) {
+        // Remove previous event items
+        menu.items.filter { $0.tag == Self.eventItemTag }.forEach { menu.removeItem($0) }
+
+        // Insert upcoming events at the top
+        let events = calendarService.upcomingEvents
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
+
+        var insertIndex = 0
+        if events.isEmpty {
+            let item = NSMenuItem(title: "No upcoming events", action: nil, keyEquivalent: "")
+            item.tag = Self.eventItemTag
+            menu.insertItem(item, at: insertIndex)
+            insertIndex += 1
+        } else {
+            for event in events {
+                let item = NSMenuItem(title: event.title ?? "Untitled", action: #selector(openEventInCalendar(_:)), keyEquivalent: "")
+                item.tag = Self.eventItemTag
+
+                let relativeTime = formatter.localizedString(for: event.startDate, relativeTo: .now)
+                let titleStr = NSMutableAttributedString(
+                    string: (event.title ?? "Untitled") + "\n",
+                    attributes: [.font: NSFont.menuFont(ofSize: 0)]
+                )
+                titleStr.append(NSAttributedString(
+                    string: relativeTime,
+                    attributes: [
+                        .font: NSFont.menuFont(ofSize: 11),
+                        .foregroundColor: NSColor.secondaryLabelColor
+                    ]
+                ))
+                item.attributedTitle = titleStr
+
+                // Calendar color dot
+                let size = CGSize(width: 12, height: 12)
+                item.image = NSImage(size: size, flipped: false) { rect in
+                    NSColor(cgColor: event.calendar.cgColor)?.setFill()
+                    NSBezierPath(ovalIn: rect).fill()
+                    return true
+                }
+
+                menu.insertItem(item, at: insertIndex)
+                insertIndex += 1
+            }
+        }
+
+        let separator = NSMenuItem.separator()
+        separator.tag = Self.eventItemTag
+        menu.insertItem(separator, at: insertIndex)
+
+        // Update calendar submenu
         guard let calendarsItem = menu.items.first(where: { $0.title == "Calendars" }),
               let submenu = calendarsItem.submenu else { return }
         submenu.removeAllItems()
