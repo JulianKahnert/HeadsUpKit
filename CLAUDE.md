@@ -14,7 +14,7 @@ There are no automated tests in this project currently.
 
 ## Architecture
 
-This is a macOS menu bar app (minimum deployment target: macOS 26.2) using SwiftUI with AppKit integration.
+This is a macOS menu bar app (minimum deployment target: macOS 15) using SwiftUI with AppKit integration.
 
 **Key settings:**
 - `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` — all types are implicitly `@MainActor`
