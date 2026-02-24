@@ -82,7 +82,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openEventInCalendar(_ sender: NSMenuItem) {
-        guard let url = URL(string: "ical://") else { return }
+        guard let eventIdentifier = (sender.representedObject as? EKEvent)?.eventIdentifier,
+              let url = URL(string: "ical://ekevent/\(eventIdentifier)?method=show&options=more") else { return }
         NSWorkspace.shared.open(url)
     }
 
