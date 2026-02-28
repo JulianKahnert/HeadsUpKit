@@ -1,6 +1,7 @@
 import Cocoa
 import EventKit
 import OSLog
+import ServiceManagement
 import SwiftUI
 
 private let logger = Logger(subsystem: "de.juliankahnert.HeadsUpKit", category: "AppDelegate")
@@ -71,6 +72,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         calendarsItem.submenu = NSMenu(title: "Calendars")
         menu.addItem(calendarsItem)
 
+        let launchItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin(_:)), keyEquivalent: "")
+        launchItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        menu.addItem(launchItem)
+
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
@@ -85,6 +90,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let eventIdentifier = (sender.representedObject as? EKEvent)?.eventIdentifier,
               let url = URL(string: "ical://ekevent/\(eventIdentifier)?method=show&options=more") else { return }
         NSWorkspace.shared.open(url)
+    }
+
+    @objc private func toggleLaunchAtLogin(_ sender: NSMenuItem) {
+        do {
+            if SMAppService.mainApp.status == .enabled {
+                try SMAppService.mainApp.unregister()
+            } else {
+                try SMAppService.mainApp.register()
+            }
+        } catch {
+            logger.error("Failed to toggle launch at login: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     @objc private func toggleCalendar(_ sender: NSMenuItem) {
@@ -287,6 +304,11 @@ extension AppDelegate: NSMenuDelegate {
         let separator = NSMenuItem.separator()
         separator.tag = Self.eventItemTag
         menu.insertItem(separator, at: insertIndex)
+
+        // Update launch at login state
+        if let launchItem = menu.items.first(where: { $0.action == #selector(toggleLaunchAtLogin(_:)) }) {
+            launchItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        }
 
         // Update calendar submenu
         guard let calendarsItem = menu.items.first(where: { $0.title == "Calendars" }),
