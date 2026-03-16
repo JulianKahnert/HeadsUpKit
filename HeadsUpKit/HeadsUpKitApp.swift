@@ -19,6 +19,7 @@ struct HeadsUpKitApp: App {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
+    private var overlayHostingView: NSHostingView<AnyView>?
     private var overlayWindows: [NSWindow] = []
     private var calendarService = CalendarService()
     private var pollTask: Task<Void, Never>?
@@ -30,6 +31,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         UserDefaults.standard.register(defaults: ["leadTimeSeconds": 60.0])
         setupStatusItem()
 
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(screenParametersDidChange(_:)),
+            name: NSApplication.didChangeScreenParametersNotification,
+            object: nil
+        )
+
         pollTask = Task {
             await calendarService.requestAccess()
             while !Task.isCancelled {
@@ -40,6 +48,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        NotificationCenter.default.removeObserver(self, name: NSApplication.didChangeScreenParametersNotification, object: nil)
         pollTask?.cancel()
         pendingOverlayTask?.cancel()
     }
@@ -171,39 +180,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Overlay
 
+    @objc private func screenParametersDidChange(_ notification: Notification) {
+        guard overlayHostingView != nil else { return }
+        logger.debug("Screen parameters changed, updating overlay windows")
+        layoutOverlayWindows()
+    }
+
+    private func showOverlay(title: String, description: String?, location: String? = nil, eventDate: Date? = nil) {
+        let contentView = OverlayView(title: title, description: description, location: location, eventDate: eventDate) { [weak self] in
+            self?.dismissOverlay()
+        }
+        let hostingView = NSHostingView(rootView: AnyView(contentView
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        ))
+        hostingView.autoresizingMask = [.width, .height]
+        overlayHostingView = hostingView
+
+        layoutOverlayWindows()
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Tears down all overlay windows and rebuilds one per screen.
+    /// The first screen gets the `overlayHostingView` with the UI content, all others are blur-only.
+    private func layoutOverlayWindows() {
+        for window in overlayWindows {
+            window.orderOut(nil)
+        }
+        overlayWindows.removeAll()
+
+        let screens = NSScreen.screens
+        for (index, screen) in screens.enumerated() {
+            let window = makeBlurWindow(for: screen)
+
+            if index == 0, let hostingView = overlayHostingView {
+                hostingView.frame = window.contentView?.bounds ?? .zero
+                (window.contentView as? NSVisualEffectView)?.addSubview(hostingView)
+                window.makeKeyAndOrderFront(nil)
+            } else {
+                window.orderFront(nil)
+            }
+
+            overlayWindows.append(window)
+        }
+    }
+
     private func dismissOverlay() {
         for window in overlayWindows {
             window.orderOut(nil)
         }
         overlayWindows.removeAll()
-    }
-
-    private func showOverlay(title: String, description: String?, location: String? = nil, eventDate: Date? = nil) {
-        let screens = NSScreen.screens
-        guard let mainScreen = screens.first else { return }
-
-        // Main screen: blur + overlay content
-        let mainWindow = makeBlurWindow(for: mainScreen)
-        let contentView = OverlayView(title: title, description: description, location: location, eventDate: eventDate) { [weak self] in
-            self?.dismissOverlay()
-        }
-        let hostingView = NSHostingView(rootView: contentView
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        )
-        hostingView.frame = mainWindow.contentView?.bounds ?? .zero
-        hostingView.autoresizingMask = [.width, .height]
-        (mainWindow.contentView as? NSVisualEffectView)?.addSubview(hostingView)
-        mainWindow.makeKeyAndOrderFront(nil)
-        overlayWindows.append(mainWindow)
-
-        // Secondary screens: blur only
-        for screen in screens.dropFirst() {
-            let window = makeBlurWindow(for: screen)
-            window.orderFront(nil)
-            overlayWindows.append(window)
-        }
-
-        NSApp.activate(ignoringOtherApps: true)
+        overlayHostingView = nil
     }
 
     private func makeBlurWindow(for screen: NSScreen) -> NSWindow {
