@@ -25,6 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pollTask: Task<Void, Never>?
     private var pendingOverlayTask: Task<Void, Never>?
     private var pendingEventID: String?
+    private var pendingFireDate: Date?
     private var shownEventIDs: Set<String> = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -35,6 +36,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self,
             selector: #selector(screenParametersDidChange(_:)),
             name: NSApplication.didChangeScreenParametersNotification,
+            object: nil
+        )
+
+        // After system sleep, Task.sleep continuations can fire late relative to wall-clock.
+        // Re-evaluating immediately on wake reschedules the trigger against current time.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(systemDidWake(_:)),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
+
+        // NTP or manual clock corrections shift wall time without waking the system, so we
+        // need a separate observer to keep fireDate accurate after a clock jump.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(systemClockDidChange(_:)),
+            name: .NSSystemClockDidChange,
             object: nil
         )
 
@@ -49,8 +68,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         NotificationCenter.default.removeObserver(self, name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        NotificationCenter.default.removeObserver(self, name: .NSSystemClockDidChange, object: nil)
+        NSWorkspace.shared.notificationCenter.removeObserver(self, name: NSWorkspace.didWakeNotification, object: nil)
         pollTask?.cancel()
         pendingOverlayTask?.cancel()
+    }
+
+    @objc private func systemDidWake(_ notification: Notification) {
+        Task { await checkUpcomingEvent() }
+    }
+
+    @objc private func systemClockDidChange(_ notification: Notification) {
+        Task { await checkUpcomingEvent() }
     }
 
     // MARK: - Status Item
@@ -127,6 +156,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             pendingOverlayTask?.cancel()
             pendingOverlayTask = nil
             pendingEventID = nil
+            pendingFireDate = nil
             return
         }
 
@@ -140,40 +170,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        // Already scheduled for this event
-        guard pendingEventID != eventID else { return }
+        let fireDate = event.startDate.addingTimeInterval(-threshold)
 
-        // Cancel previous pending task if event changed
+        // Re-validate any pending task even for the same event ID: the lead-time slider or a
+        // rescheduled event may have moved fireDate, so we must cancel and recreate the task.
+        if pendingEventID == eventID, let existing = pendingFireDate, abs(existing.timeIntervalSince(fireDate)) < 0.5 {
+            return
+        }
+
+        // Cancel stale task (different event, lead time changed, or event time moved)
         pendingOverlayTask?.cancel()
         pendingOverlayTask = nil
         pendingEventID = nil
+        pendingFireDate = nil
 
-        let sleepDuration = timeUntilEvent - threshold
         let title = event.title ?? "Upcoming Event"
         let notes = event.notes
         let location = event.location
         let startDate = event.startDate
+        let sleepDuration = timeUntilEvent - threshold
 
         if sleepDuration <= 0, timeUntilEvent > 0 {
             // Already within threshold window — show immediately
             shownEventIDs.insert(eventID)
-            logger.info("Showing overlay for: \(title, privacy: .public)")
+            logger.info("Showing overlay for: \(title, privacy: .public) (already within threshold)")
             showOverlay(title: title, description: notes, location: location, eventDate: startDate)
         } else if sleepDuration > 0 {
-            // Schedule precise wake-up
             pendingEventID = eventID
-            logger.info("Scheduling overlay for: \(title, privacy: .public) in \(Int(sleepDuration))s")
+            pendingFireDate = fireDate
+            logger.info("Scheduling overlay for: \(title, privacy: .public) at \(fireDate, privacy: .public) (in \(Int(sleepDuration))s)")
             pendingOverlayTask = Task {
-                do {
-                    try await Task.sleep(for: .seconds(sleepDuration))
-                    shownEventIDs.insert(eventID)
-                    logger.info("Showing overlay for: \(title, privacy: .public)")
-                    showOverlay(title: title, description: notes, location: location, eventDate: startDate)
-                } catch {
-                    logger.debug("Pending overlay cancelled for: \(title, privacy: .public)")
+                // Sleep in ≤1 s increments toward an absolute fireDate rather than one long sleep.
+                // App Nap or system sleep may throttle or delay Task.sleep continuations; re-checking
+                // wall clock each iteration means drift self-corrects on the very next wake-up.
+                while !Task.isCancelled {
+                    let remaining = fireDate.timeIntervalSinceNow
+                    if remaining <= 0 { break }
+                    try? await Task.sleep(for: .seconds(min(remaining, 1.0)))
                 }
+                guard !Task.isCancelled else {
+                    logger.debug("Pending overlay cancelled for: \(title, privacy: .public)")
+                    return
+                }
+                let delta = Date.now.timeIntervalSince(fireDate)
+                logger.info("Showing overlay for: \(title, privacy: .public) (target: \(fireDate, privacy: .public), delta: \(String(format: "%.2f", delta))s)")
+                shownEventIDs.insert(eventID)
+                showOverlay(title: title, description: notes, location: location, eventDate: startDate)
                 pendingEventID = nil
                 pendingOverlayTask = nil
+                pendingFireDate = nil
             }
         }
     }
