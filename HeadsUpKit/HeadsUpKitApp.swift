@@ -121,7 +121,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func triggerTestOverlay() {
         logger.debug("Triggering test overlay")
-        showOverlay(title: "Team Standup", description: "1. Sprint progress & blockers\n2. Code review assignments\n3. Release timeline update", location: "Apple Park, Cupertino", eventDate: Date.now.addingTimeInterval(45))
+        // A link-only location, so the debug path exercises the real derivation in OverlayContent.
+        showOverlay(OverlayContent(
+            title: "Team Standup",
+            description: "1. Sprint progress & blockers\n2. Code review assignments\n3. Release timeline update",
+            location: "https://example.com/j/1234567890",
+            eventDate: Date.now.addingTimeInterval(45)
+        ))
     }
 
     @objc private func openEventInCalendar(_ sender: NSMenuItem) {
@@ -184,21 +190,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pendingEventID = nil
         pendingFireDate = nil
 
-        let title = event.title ?? "Upcoming Event"
-        let notes = event.notes
-        let location = event.location
-        let startDate = event.startDate
+        // Derived once here because the pending task and the overlay must never capture the EKEvent.
+        let content = OverlayContent(
+            title: event.title ?? "Upcoming Event",
+            description: event.notes,
+            location: event.location,
+            eventDate: event.startDate,
+            eventURL: event.url
+        )
         let sleepDuration = timeUntilEvent - threshold
 
         if sleepDuration <= 0, timeUntilEvent > 0 {
             // Already within threshold window — show immediately
             shownEventIDs.insert(eventID)
-            logger.info("Showing overlay for: \(title, privacy: .public) (already within threshold)")
-            showOverlay(title: title, description: notes, location: location, eventDate: startDate)
+            logger.info("Showing overlay for: \(content.title, privacy: .public) (already within threshold)")
+            showOverlay(content)
         } else if sleepDuration > 0 {
             pendingEventID = eventID
             pendingFireDate = fireDate
-            logger.info("Scheduling overlay for: \(title, privacy: .public) at \(fireDate, privacy: .public) (in \(Int(sleepDuration))s)")
+            logger.info("Scheduling overlay for: \(content.title, privacy: .public) at \(fireDate, privacy: .public) (in \(Int(sleepDuration))s)")
             pendingOverlayTask = Task {
                 // Sleep in ≤1 s increments toward an absolute fireDate rather than one long sleep.
                 // App Nap or system sleep may throttle or delay Task.sleep continuations; re-checking
@@ -209,13 +219,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     try? await Task.sleep(for: .seconds(min(remaining, 1.0)))
                 }
                 guard !Task.isCancelled else {
-                    logger.debug("Pending overlay cancelled for: \(title, privacy: .public)")
+                    logger.debug("Pending overlay cancelled for: \(content.title, privacy: .public)")
                     return
                 }
                 let delta = Date.now.timeIntervalSince(fireDate)
-                logger.info("Showing overlay for: \(title, privacy: .public) (target: \(fireDate, privacy: .public), delta: \(String(format: "%.2f", delta))s)")
+                logger.info("Showing overlay for: \(content.title, privacy: .public) (target: \(fireDate, privacy: .public), delta: \(String(format: "%.2f", delta))s)")
                 shownEventIDs.insert(eventID)
-                showOverlay(title: title, description: notes, location: location, eventDate: startDate)
+                showOverlay(content)
                 pendingEventID = nil
                 pendingOverlayTask = nil
                 pendingFireDate = nil
@@ -231,8 +241,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         layoutOverlayWindows()
     }
 
-    private func showOverlay(title: String, description: String?, location: String? = nil, eventDate: Date? = nil) {
-        let contentView = OverlayView(title: title, description: description, location: location, eventDate: eventDate) { [weak self] in
+    private func showOverlay(_ content: OverlayContent) {
+        let contentView = OverlayView(content: content) { [weak self] in
             self?.dismissOverlay()
         }
         let hostingView = NSHostingView(rootView: AnyView(contentView
