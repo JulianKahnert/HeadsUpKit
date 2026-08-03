@@ -5,12 +5,10 @@ import SwiftUI
 private let logger = Logger(subsystem: "de.juliankahnert.HeadsUpKit", category: "OverlayView")
 
 struct OverlayView: View {
-    let title: String
-    let description: String?
-    let location: String?
-    let eventDate: Date?
+    let content: OverlayContent
     let dismiss: () -> Void
 
+    @Environment(\.openURL) private var openURL
     @State private var mapPosition: MapCameraPosition?
     @State private var detailHeight: CGFloat = 0
 
@@ -31,13 +29,13 @@ struct OverlayView: View {
                 mapView
             }
 
-            dismissButton
+            actionButtons
         }
         .padding(48)
         .background(.black.opacity(0.3), in: .rect(cornerRadius: 26))
         .task {
-            if let location, !location.isEmpty {
-                await geocode(location)
+            if let mapLocation = content.mapLocation {
+                await geocode(mapLocation)
             }
         }
     }
@@ -54,12 +52,12 @@ struct OverlayView: View {
 
     private var detailsView: some View {
         VStack(spacing: 16) {
-            Text(title)
+            Text(content.title)
                 .font(.system(size: 36, weight: .bold, design: .rounded))
                 .foregroundStyle(.white)
                 .multilineTextAlignment(.center)
 
-            if let description, !description.isEmpty {
+            if let description = content.description, !description.isEmpty {
                 Text(description)
                     .font(.system(size: 18, weight: .regular, design: .rounded))
                     .foregroundStyle(.white.opacity(0.7))
@@ -68,25 +66,26 @@ struct OverlayView: View {
                     .frame(maxWidth: 360)
             }
 
-            if let eventDate, eventDate > .now {
+            if let eventDate = content.eventDate, eventDate > .now {
                 Text(timerInterval: Date.now...eventDate, countsDown: true, showsHours: false)
                     .font(.system(size: 28, weight: .semibold, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.9))
             }
-        }
-    }
 
-    private var hasLocation: Bool {
-        location?.isEmpty == false
+            if let url = content.url {
+                metaLabel(url.host() ?? "Link", systemImage: "link")
+                    .lineLimit(1)
+            }
+        }
     }
 
     @ViewBuilder
     private var mapView: some View {
-        if hasLocation {
+        if let mapLocation = content.mapLocation {
             VStack(spacing: 8) {
                 if let mapPosition {
                     Map(initialPosition: mapPosition) {
-                        Marker(location ?? title, coordinate: mapPosition.region?.center ?? .init())
+                        Marker(mapLocation, coordinate: mapPosition.region?.center ?? .init())
                     }
                     .mapStyle(.standard)
                     .frame(width: detailHeight, height: detailHeight)
@@ -99,28 +98,48 @@ struct OverlayView: View {
                         .redacted(reason: .placeholder)
                 }
 
-                if let location, !location.isEmpty {
-                    Label(location, systemImage: "mappin.circle.fill")
-                        .font(.system(size: 13, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.6))
-                        .lineLimit(3)
-                        .frame(maxWidth: detailHeight, alignment: .leading)
-                }
+                metaLabel(mapLocation, systemImage: "mappin.circle.fill")
+                    .lineLimit(3)
+                    .frame(maxWidth: detailHeight, alignment: .leading)
             }
         }
     }
 
-    private var dismissButton: some View {
-        Button(action: dismiss) {
-            Text("OK")
-                .font(.title3)
-                .padding(.horizontal, 32)
-                .padding(.vertical, 8)
+    private var actionButtons: some View {
+        HStack(spacing: 16) {
+            if let url = content.url {
+                Button {
+                    openURL(url)
+                    dismiss()
+                } label: {
+                    buttonLabel("Open")
+                }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+            }
+
+            Button(action: dismiss) {
+                buttonLabel("OK")
+            }
+            .keyboardShortcut(.cancelAction)
+            .buttonStyle(.bordered)
+            .controlSize(.large)
         }
-        .keyboardShortcut(.escape, modifiers: [])
-        .buttonStyle(.bordered)
-        .controlSize(.large)
         .padding(.top, 4)
+    }
+
+    private func buttonLabel(_ title: String) -> some View {
+        Text(title)
+            .font(.title3)
+            .padding(.horizontal, 32)
+            .padding(.vertical, 8)
+    }
+
+    private func metaLabel(_ text: String, systemImage: String) -> some View {
+        Label(text, systemImage: systemImage)
+            .font(.system(size: 13, design: .rounded))
+            .foregroundStyle(.white.opacity(0.6))
     }
 
     // MARK: - Geocoding
@@ -143,22 +162,38 @@ struct OverlayView: View {
     }
 }
 
+#Preview("With Link") {
+    OverlayView(
+        content: OverlayContent(
+            title: "Team Standup",
+            description: "Daily sync with the engineering team.",
+            location: "https://example.com/j/1234567890",
+            eventDate: Date.now.addingTimeInterval(45)
+        ),
+        dismiss: {}
+    )
+}
+
 #Preview("With Location") {
     OverlayView(
-        title: "Team Standup",
-        description: "Daily sync with the engineering team.",
-        location: "Apple Park, Cupertino",
-        eventDate: Date.now.addingTimeInterval(45),
+        content: OverlayContent(
+            title: "Team Standup",
+            description: "Daily sync with the engineering team.",
+            location: "Apple Park, Cupertino",
+            eventDate: Date.now.addingTimeInterval(45)
+        ),
         dismiss: {}
     )
 }
 
 #Preview("Without Location") {
     OverlayView(
-        title: "Team Standup",
-        description: "Daily sync with the engineering team.",
-        location: nil,
-        eventDate: Date.now.addingTimeInterval(30),
+        content: OverlayContent(
+            title: "Team Standup",
+            description: "Daily sync with the engineering team.",
+            location: nil,
+            eventDate: Date.now.addingTimeInterval(30)
+        ),
         dismiss: {}
     )
 }
