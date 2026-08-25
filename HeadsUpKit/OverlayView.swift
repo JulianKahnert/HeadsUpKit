@@ -66,15 +66,32 @@ struct OverlayView: View {
                     .frame(maxWidth: 360)
             }
 
-            if let eventDate = content.eventDate, eventDate > .now {
-                Text(timerInterval: Date.now...eventDate, countsDown: true, showsHours: false)
-                    .font(.system(size: 28, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.9))
-            }
+            timeView
 
             if let url = content.url {
                 metaLabel(url.host() ?? "Link", systemImage: "link")
                     .lineLimit(1)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var timeView: some View {
+        if let eventDate = content.eventDate {
+            if eventDate > .now {
+                Text(timerInterval: Date.now...eventDate, countsDown: true, showsHours: false)
+                    .font(.system(size: 28, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.9))
+            } else {
+                // A catch-up overlay can sit on screen for minutes, so the elapsed time keeps
+                // counting instead of freezing at the value it had when the overlay appeared.
+                VStack(spacing: 4) {
+                    Text(eventDate, style: .timer)
+                        .font(.system(size: 28, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.9))
+
+                    metaLabel("Already started", systemImage: "exclamationmark.circle.fill")
+                }
             }
         }
     }
@@ -181,6 +198,18 @@ struct OverlayView: View {
             description: "Daily sync with the engineering team.",
             location: "Apple Park, Cupertino",
             eventDate: Date.now.addingTimeInterval(45)
+        ),
+        dismiss: {}
+    )
+}
+
+#Preview("Already Started") {
+    OverlayView(
+        content: OverlayContent(
+            title: "Team Standup",
+            description: "Daily sync with the engineering team.",
+            location: "Apple Park, Cupertino",
+            eventDate: Date.now.addingTimeInterval(-125)
         ),
         dismiss: {}
     )
