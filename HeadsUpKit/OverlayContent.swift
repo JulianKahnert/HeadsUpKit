@@ -2,7 +2,7 @@ import Foundation
 
 /// The plain values the overlay presents, derived once from the event's raw fields — the view
 /// layer must never depend on EventKit or link detection.
-struct OverlayContent {
+nonisolated struct OverlayContent {
     let title: String
     let description: String?
     /// The event's location, or nil when it is empty or nothing but a link — a URL is no

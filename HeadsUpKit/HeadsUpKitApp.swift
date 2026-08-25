@@ -1,5 +1,4 @@
 import Cocoa
-import EventKit
 import OSLog
 import ServiceManagement
 import SwiftUI
@@ -21,12 +20,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var overlayHostingView: NSHostingView<AnyView>?
     private var overlayWindows: [NSWindow] = []
-    private var calendarService = CalendarService()
+    var calendarService = CalendarService()
     private var pollTask: Task<Void, Never>?
-    private var pendingOverlayTask: Task<Void, Never>?
-    private var pendingEventID: String?
-    private var pendingFireDate: Date?
-    private var shownEventIDs: Set<String> = []
+    private var pollSleepTask: Task<Void, Never>?
+    private var firedOccurrences = FiredOccurrenceStore()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         UserDefaults.standard.register(defaults: ["leadTimeSeconds": 60.0])
@@ -38,48 +35,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             name: NSApplication.didChangeScreenParametersNotification,
             object: nil
         )
-
-        // After system sleep, Task.sleep continuations can fire late relative to wall-clock.
-        // Re-evaluating immediately on wake reschedules the trigger against current time.
-        NSWorkspace.shared.notificationCenter.addObserver(
-            self,
-            selector: #selector(systemDidWake(_:)),
-            name: NSWorkspace.didWakeNotification,
-            object: nil
-        )
-
-        // NTP or manual clock corrections shift wall time without waking the system, so we
-        // need a separate observer to keep fireDate accurate after a clock jump.
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(systemClockDidChange(_:)),
-            name: .NSSystemClockDidChange,
-            object: nil
-        )
+        registerLifecycleObservers()
 
         pollTask = Task {
             await calendarService.requestAccess()
+            await calendarService.refresh(reason: .launch)
             while !Task.isCancelled {
-                await checkUpcomingEvent()
-                try? await Task.sleep(for: .seconds(30))
+                // Deliberately not awaited: `reconcile()` decides on the snapshot it already has,
+                // so in the final 90 s it may act on data up to 25 s old. `EKEventStoreChanged` is
+                // what keeps a genuine deletion from reaching that window in the first place.
+                if calendarService.isSnapshotStale {
+                    Task { await refreshAndRearm(.poll) }
+                }
+                // The wait is a task of its own so a trigger can cut it short: the loop then
+                // re-decides at once instead of arming a new event up to 30 s late.
+                let interval = reconcile()
+                let sleep = Task<Void, Never> { try? await Task.sleep(for: interval) }
+                pollSleepTask = sleep
+                await sleep.value
             }
         }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        NotificationCenter.default.removeObserver(self, name: NSApplication.didChangeScreenParametersNotification, object: nil)
-        NotificationCenter.default.removeObserver(self, name: .NSSystemClockDidChange, object: nil)
-        NSWorkspace.shared.notificationCenter.removeObserver(self, name: NSWorkspace.didWakeNotification, object: nil)
+        NotificationCenter.default.removeObserver(
+            self,
+            name: NSApplication.didChangeScreenParametersNotification,
+            object: nil
+        )
+        removeLifecycleObservers()
+        pollSleepTask?.cancel()
         pollTask?.cancel()
-        pendingOverlayTask?.cancel()
-    }
-
-    @objc private func systemDidWake(_ notification: Notification) {
-        Task { await checkUpcomingEvent() }
-    }
-
-    @objc private func systemClockDidChange(_ notification: Notification) {
-        Task { await checkUpcomingEvent() }
     }
 
     // MARK: - Status Item
@@ -131,7 +117,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openEventInCalendar(_ sender: NSMenuItem) {
-        guard let eventIdentifier = (sender.representedObject as? EKEvent)?.eventIdentifier,
+        guard let eventIdentifier = sender.representedObject as? String,
               let url = URL(string: "ical://ekevent/\(eventIdentifier)?method=show&options=more") else { return }
         NSWorkspace.shared.open(url)
     }
@@ -149,88 +135,82 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func toggleCalendar(_ sender: NSMenuItem) {
-        guard let calendarID = sender.representedObject as? String,
-              let calendar = calendarService.allCalendars.first(where: { $0.calendarIdentifier == calendarID }) else { return }
-        calendarService.toggleCalendar(calendar)
+        guard let calendarID = sender.representedObject as? String else { return }
+        calendarService.toggleCalendar(id: calendarID)
+        Task { await refreshAndRearm(.calendarSelection) }
     }
 
-    // MARK: - Event Check
+    // MARK: - Reconcile
 
-    private func checkUpcomingEvent() async {
-        guard let event = calendarService.nextEvent else {
-            logger.debug("No upcoming event found")
-            pendingOverlayTask?.cancel()
-            pendingOverlayTask = nil
-            pendingEventID = nil
-            pendingFireDate = nil
-            return
+    /// Decides from scratch what the app should show right now and returns how long the poll loop
+    /// should wait before asking again.
+    ///
+    /// Synchronous and free of suspension points on purpose: the MainActor then serializes the
+    /// poll, wake, unlock and clock-change triggers — which after a wake all arrive at the same
+    /// instant — so none of them can interleave and act on half-applied state. That is why it
+    /// decides on the cached `CalendarSnapshot` and never awaits a refresh; an `await` in here
+    /// re-opens the race.
+    @discardableResult
+    func reconcile() -> Duration {
+        let now = Date.now
+        firedOccurrences.prune(now: now)
+
+        // Read live rather than cached: a fast user switch moves the session off the console
+        // while posting `com.apple.sessionDidMoveOffConsole`, never `com.apple.screenIsLocked`.
+        // Deliberately without a record either way: an occurrence resolved behind the lock screen
+        // would be consumed invisibly, and the unlock handler could never catch it up.
+        guard !Self.screenIsLocked() else {
+            logger.debug("Screen locked, deferring any overlay")
+            return .seconds(30)
         }
 
-        let eventID = event.eventIdentifier ?? UUID().uuidString
-        let threshold = UserDefaults.standard.double(forKey: "leadTimeSeconds")
-        let timeUntilEvent = event.startDate.timeIntervalSinceNow
-        logger.debug("Next event: \(event.title ?? "nil", privacy: .public) in \(Int(timeUntilEvent))s (threshold: \(Int(threshold))s)")
-
-        guard !shownEventIDs.contains(eventID) else {
-            logger.debug("Event already shown: \(event.title ?? "nil", privacy: .public)")
-            return
+        let candidates = calendarService.snapshot.candidates
+        guard !candidates.isEmpty else {
+            // Normal before the first refresh lands, and by now genuinely empty otherwise:
+            // `CalendarStore` has already vetoed the empty fetches nothing explains.
+            logger.debug("No overlay candidates in the fetch window")
+            return .seconds(30)
         }
 
-        let fireDate = event.startDate.addingTimeInterval(-threshold)
-
-        // Re-validate any pending task even for the same event ID: the lead-time slider or a
-        // rescheduled event may have moved fireDate, so we must cancel and recreate the task.
-        if pendingEventID == eventID, let existing = pendingFireDate, abs(existing.timeIntervalSince(fireDate)) < 0.5 {
-            return
-        }
-
-        // Cancel stale task (different event, lead time changed, or event time moved)
-        pendingOverlayTask?.cancel()
-        pendingOverlayTask = nil
-        pendingEventID = nil
-        pendingFireDate = nil
-
-        // Derived once here because the pending task and the overlay must never capture the EKEvent.
-        let content = OverlayContent(
-            title: event.title ?? "Upcoming Event",
-            description: event.notes,
-            location: event.location,
-            eventDate: event.startDate,
-            eventURL: event.url
+        let leadTime = UserDefaults.standard.double(forKey: "leadTimeSeconds")
+        let decision = OverlaySchedule.decide(
+            candidates: candidates,
+            fired: firedOccurrences.records,
+            leadTime: leadTime,
+            now: now
         )
-        let sleepDuration = timeUntilEvent - threshold
 
-        if sleepDuration <= 0, timeUntilEvent > 0 {
-            // Already within threshold window — show immediately
-            shownEventIDs.insert(eventID)
-            logger.info("Showing overlay for: \(content.title, privacy: .public) (already within threshold)")
-            showOverlay(content)
-        } else if sleepDuration > 0 {
-            pendingEventID = eventID
-            pendingFireDate = fireDate
-            logger.info("Scheduling overlay for: \(content.title, privacy: .public) at \(fireDate, privacy: .public) (in \(Int(sleepDuration))s)")
-            pendingOverlayTask = Task {
-                // Sleep in ≤1 s increments toward an absolute fireDate rather than one long sleep.
-                // App Nap or system sleep may throttle or delay Task.sleep continuations; re-checking
-                // wall clock each iteration means drift self-corrects on the very next wake-up.
-                while !Task.isCancelled {
-                    let remaining = fireDate.timeIntervalSinceNow
-                    if remaining <= 0 { break }
-                    try? await Task.sleep(for: .seconds(min(remaining, 1.0)))
-                }
-                guard !Task.isCancelled else {
-                    logger.debug("Pending overlay cancelled for: \(content.title, privacy: .public)")
-                    return
-                }
-                let delta = Date.now.timeIntervalSince(fireDate)
-                logger.info("Showing overlay for: \(content.title, privacy: .public) (target: \(fireDate, privacy: .public), delta: \(String(format: "%.2f", delta))s)")
-                shownEventIDs.insert(eventID)
-                showOverlay(content)
-                pendingEventID = nil
-                pendingOverlayTask = nil
-                pendingFireDate = nil
+        switch decision {
+        case .fire(let candidate, let superseded):
+            // Resolved without an overlay: the one being shown covers them.
+            for occurrence in superseded {
+                firedOccurrences.insert(occurrence)
             }
+            let delta = now.timeIntervalSince(candidate.startDate.addingTimeInterval(-leadTime))
+            logger.info("""
+                Showing overlay for: \(candidate.content.title, privacy: .public) \
+                (start: \(candidate.startDate, privacy: .public), \
+                delta: \(delta, format: .fixed(precision: 2), privacy: .public)s, \
+                superseded: \(superseded.count, privacy: .public))
+                """)
+            firedOccurrences.insert(candidate)
+            showOverlay(candidate.content)
+        case .armed(let candidate, let fireDate):
+            logger.debug("""
+                Next overlay: \(candidate.content.title, privacy: .public) \
+                at \(fireDate, privacy: .public)
+                """)
+        case .idle:
+            logger.debug("No candidate left to alert for")
         }
+
+        return OverlaySchedule.pollInterval(after: decision, now: now)
+    }
+
+    /// Cuts the poll loop's wait short so it reconciles now, against the current snapshot and
+    /// the current lock state.
+    func reconcileNow() {
+        pollSleepTask?.cancel()
     }
 
     // MARK: - Overlay
@@ -335,29 +315,39 @@ struct LeadTimeSlider: View {
 extension AppDelegate: NSMenuDelegate {
     private static let eventItemTag = 999
 
+    /// The menu is built from the cached snapshot, so an open shows what the last refresh found —
+    /// up to 25 s old. This fetch is what makes the next open current.
+    func menuWillOpen(_ menu: NSMenu) {
+        Task { await refreshAndRearm(.menuOpened) }
+    }
+
     func menuNeedsUpdate(_ menu: NSMenu) {
         // Remove previous event items
         menu.items.filter { $0.tag == Self.eventItemTag }.forEach { menu.removeItem($0) }
 
         // Insert upcoming events at the top
-        let events = calendarService.upcomingEvents
+        let snapshot = calendarService.snapshot
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .full
 
         var insertIndex = 0
-        if events.isEmpty {
+        if snapshot.menuEvents.isEmpty {
             let item = NSMenuItem(title: "No upcoming events", action: nil, keyEquivalent: "")
             item.tag = Self.eventItemTag
             menu.insertItem(item, at: insertIndex)
             insertIndex += 1
         } else {
-            for event in events {
-                let item = NSMenuItem(title: event.title ?? "Untitled", action: #selector(openEventInCalendar(_:)), keyEquivalent: "")
+            for event in snapshot.menuEvents {
+                // Without an identifier there is no `ical://` URL to open, so the item stays inert
+                // rather than carrying an action that silently does nothing.
+                let action = event.eventIdentifier == nil ? nil : #selector(openEventInCalendar(_:))
+                let item = NSMenuItem(title: event.title, action: action, keyEquivalent: "")
                 item.tag = Self.eventItemTag
+                item.representedObject = event.eventIdentifier
 
                 let relativeTime = formatter.localizedString(for: event.startDate, relativeTo: .now)
                 let titleStr = NSMutableAttributedString(
-                    string: (event.title ?? "Untitled") + "\n",
+                    string: event.title + "\n",
                     attributes: [.font: NSFont.menuFont(ofSize: 0)]
                 )
                 titleStr.append(NSAttributedString(
@@ -368,14 +358,7 @@ extension AppDelegate: NSMenuDelegate {
                     ]
                 ))
                 item.attributedTitle = titleStr
-
-                // Calendar color dot
-                let size = CGSize(width: 12, height: 12)
-                item.image = NSImage(size: size, flipped: false) { rect in
-                    NSColor(cgColor: event.calendar.cgColor)?.setFill()
-                    NSBezierPath(ovalIn: rect).fill()
-                    return true
-                }
+                item.image = Self.colorDot(event.color)
 
                 menu.insertItem(item, at: insertIndex)
                 insertIndex += 1
@@ -396,21 +379,20 @@ extension AppDelegate: NSMenuDelegate {
               let submenu = calendarsItem.submenu else { return }
         submenu.removeAllItems()
 
-        for calendar in calendarService.allCalendars.sorted(by: { $0.title < $1.title }) {
+        for calendar in snapshot.calendars.sorted(by: { $0.title < $1.title }) {
             let item = NSMenuItem(title: calendar.title, action: #selector(toggleCalendar(_:)), keyEquivalent: "")
-            item.representedObject = calendar.calendarIdentifier
-            item.state = calendarService.isSelected(calendar) ? .on : .off
-
-            // Color indicator
-            let size = CGSize(width: 12, height: 12)
-            let image = NSImage(size: size, flipped: false) { rect in
-                NSColor(cgColor: calendar.cgColor)?.setFill()
-                NSBezierPath(ovalIn: rect).fill()
-                return true
-            }
-            item.image = image
-
+            item.representedObject = calendar.id
+            item.state = calendarService.isSelected(id: calendar.id) ? .on : .off
+            item.image = Self.colorDot(calendar.color)
             submenu.addItem(item)
+        }
+    }
+
+    private static func colorDot(_ color: CalendarColor) -> NSImage {
+        NSImage(size: CGSize(width: 12, height: 12), flipped: false) { rect in
+            NSColor(srgbRed: color.red, green: color.green, blue: color.blue, alpha: color.alpha).setFill()
+            NSBezierPath(ovalIn: rect).fill()
+            return true
         }
     }
 }
